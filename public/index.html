@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Read-only Pharos Mainnet Multicall3 simulation and transaction preparation.">
+  <title>Pharos Batch Executor</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1120;
+      --card: #1e293b;
+      --accent: #38bdf8;
+      --text: #f8fafc;
+      --muted: #94a3b8;
+      --border: #334155;
+      --green: #22c55e;
+      --red: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 2rem 1rem;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .container { max-width: 900px; margin: 0 auto; }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    h1 { font-size: 1.7rem; margin: 0; }
+    h2 { font-size: 1.15rem; margin: 0 0 1rem; }
+    p { color: var(--muted); }
+    label { display: block; font-weight: 600; margin: 1rem 0 0.4rem; }
+    input, textarea {
+      width: 100%;
+      background: #0f172a;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.75rem;
+      font: inherit;
+    }
+    textarea {
+      min-height: 220px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85rem;
+      resize: vertical;
+    }
+    button {
+      background: var(--accent);
+      color: #000;
+      border: 0;
+      border-radius: 6px;
+      padding: 0.7rem 1.1rem;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    button:disabled { cursor: wait; opacity: 0.6; }
+    pre {
+      background: #000;
+      padding: 1rem;
+      border-radius: 6px;
+      color: var(--accent);
+      font-size: 0.82rem;
+      overflow: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+    .notice { border-left: 3px solid var(--accent); padding-left: 0.8rem; }
+    .check-row { display: flex; gap: 0.6rem; align-items: flex-start; margin: 1rem 0; }
+    .check-row input { width: auto; margin-top: 0.35rem; }
+    .check-row label { margin: 0; font-weight: 400; }
+    .error { color: var(--red); }
+    .success { color: var(--green); }
+    .summary { white-space: pre-wrap; }
+    @media (max-width: 600px) {
+      body { padding: 1rem 0.75rem; }
+      .card { padding: 1rem; }
+      h1 { font-size: 1.4rem; }
+    }
+  </style>
+</head>
+<body>
+  <main class="container">
+    <header class="card">
+      <h1>Pharos Mainnet Batch Executor</h1>
+      <p class="notice">
+        Read-only preflight on Pharos Pacific Mainnet (chain ID 1672). It
+        simulates the individual calls and combined Multicall3 transaction,
+        then prepares unsigned transaction data only. It never signs or sends.
+      </p>
+      <p>
+        The sender address is simulation context only; it does not prove account
+        ownership. Mainnet state may change after the simulation.
+      </p>
+      <p class="notice">
+        Batched subcalls run from Multicall3, not from the sender. Standard token
+        transfers and sender-dependent claims may behave differently; native
+        transfers are not supported.
+      </p>
+    </header>
+
+    <section class="card" aria-labelledby="prepare-heading">
+      <h2 id="prepare-heading">Simulate and prepare a batch</h2>
+      <p>
+        Provide at least three independent actions. The examples below are safe,
+        read-only Multicall3 calls; replace them with your own contract calls
+        before preparing an application transaction.
+      </p>
+
+      <label for="sender">Sender address</label>
+      <input id="sender" type="text"
+        value="0x4444444444444444444444444444444444444444"
+        autocomplete="off" spellcheck="false">
+
+      <label for="actions">Actions (JSON array)</label>
+      <textarea id="actions" spellcheck="false">[
+  {
+    "target": "0xcA11bde05977b3631167028862bE2a173976CA11",
+    "data": "0x3408e470",
+    "description": "Read Pharos chain ID"
+  },
+  {
+    "target": "0xcA11bde05977b3631167028862bE2a173976CA11",
+    "data": "0x42cbb15c",
+    "description": "Read current block number"
+  },
+  {
+    "target": "0xcA11bde05977b3631167028862bE2a173976CA11",
+    "data": "0x4d2301cc0000000000000000000000004444444444444444444444444444444444444444",
+    "description": "Read sample sender balance"
+  }
+]</textarea>
+
+      <div class="check-row">
+        <input id="independent" type="checkbox">
+        <label for="independent">
+          I confirm these actions are independent and do not rely on another
+          action in this batch.
+        </label>
+      </div>
+      <button id="simulate-button" type="button">Run mainnet preflight</button>
+      <p id="simulation-status" aria-live="polite"></p>
+      <div id="simulation-summary" class="summary" aria-live="polite"></div>
+      <pre id="simulation-output">Simulation evidence and unsigned transaction data will appear here.</pre>
+    </section>
+  </main>
+
+  <script>
+    const senderInput = document.getElementById("sender");
+    const actionsInput = document.getElementById("actions");
+    const independentInput = document.getElementById("independent");
+    const simulateButton = document.getElementById("simulate-button");
+    const status = document.getElementById("simulation-status");
+    const summary = document.getElementById("simulation-summary");
+    const output = document.getElementById("simulation-output");
+
+    function showStatus(message, isError = false) {
+      status.textContent = message;
+      status.className = isError ? "error" : "success";
+    }
+
+    function parseActions() {
+      const actions = JSON.parse(actionsInput.value);
+      if (!Array.isArray(actions)) {
+        throw new Error("Actions must be a JSON array.");
+      }
+      return actions;
+    }
+
+    function renderSummary(report) {
+      const lines = [
+        `${report.network.name} (${report.network.chainId}), block ${report.network.blockNumber ?? "unknown"}`,
+        `Multicall3 code verified: ${report.contractVerification.verified}`,
+        `Combined simulation: ${report.batchOutcome}`,
+        report.continuation,
+        `Calls/actions: ${report.executionReduction.individualCalls} -> ${report.executionReduction.batchedCalls} (${report.executionReduction.reduction} fewer)`,
+        report.gasComparison.available
+          ? `Gas: ${report.gasComparison.individualGasTotal} individual -> ${report.gasComparison.batchGas} batched; difference ${report.gasComparison.difference} (${report.gasComparison.percent})`
+          : `Gas comparison unavailable: ${report.gasComparison.reason}`
+      ];
+      for (const action of report.actions) {
+        const diagnostic = action.diagnostic?.call;
+        const diagnosticStatus = diagnostic?.ok
+          ? "direct-call diagnostic succeeded"
+          : `direct-call diagnostic ${diagnostic?.kind ?? "unknown"}`;
+        lines.push(
+          `${action.index}. ${action.description} [${action.target}]: ${action.status}; ${diagnosticStatus}`
+        );
+        if (action.reason) lines.push(`   ${action.reason}`);
+      }
+      lines.push(report.callerSemantics);
+      if (!report.unsignedTransaction) {
+        lines.push("Unsigned transaction withheld because the combined simulation did not succeed.");
+      }
+      return lines.join("\n");
+    }
+
+    async function simulate() {
+      simulateButton.disabled = true;
+      senderInput.disabled = true;
+      actionsInput.disabled = true;
+      independentInput.disabled = true;
+      summary.textContent = "";
+      output.textContent = "Waiting for Pharos Mainnet read-only RPC...";
+      showStatus("Verifying network, Multicall3 code, and batch behavior...");
+      try {
+        const response = await fetch("/api/batch", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "simulate",
+            independent: independentInput.checked,
+            from: senderInput.value.trim(),
+            chainId: 1672,
+            actions: parseActions()
+          })
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) {
+          throw new Error(result.error || `Request failed (${response.status}).`);
+        }
+        summary.textContent = renderSummary(result.report);
+        output.textContent = JSON.stringify(result.report, null, 2);
+        showStatus(
+          result.report.unsignedTransaction
+            ? "Preflight complete. The unsigned transaction has not been sent."
+            : "Preflight did not authorize transaction preparation."
+        );
+      } catch (error) {
+        showStatus(error.message, true);
+        summary.textContent = "";
+        output.textContent = "No transaction was prepared.";
+      } finally {
+        simulateButton.disabled = false;
+        senderInput.disabled = false;
+        actionsInput.disabled = false;
+        independentInput.disabled = false;
+      }
+    }
+
+    function invalidateSimulation() {
+      summary.textContent = "";
+      output.textContent = "Inputs changed. Run a fresh mainnet preflight.";
+      showStatus("Previous simulation cleared.");
+    }
+
+    simulateButton.addEventListener("click", simulate);
+    senderInput.addEventListener("input", invalidateSimulation);
+    actionsInput.addEventListener("input", invalidateSimulation);
+    independentInput.addEventListener("change", invalidateSimulation);
+  </script>
+</body>
+</html>

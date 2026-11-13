@@ -1,0 +1,21 @@
+{
+  "name": "batch-executor",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Simulate and prepare unsigned Pharos Mainnet Multicall3 batches",
+  "scripts": {
+    "test": "node test/index.test.mjs",
+    "dev": "npx wrangler pages dev public --port=8788"
+  },
+  "keywords": [
+    "pharos",
+    "multicall",
+    "batch-executor",
+    "gas-optimization"
+  ],
+  "author": "Pharos Builder",
+  "license": "MIT",
+  "dependencies": {
+    "viem": "^2.57.19"
+  }
+}
