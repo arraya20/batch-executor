@@ -4,6 +4,7 @@
   "type": "module",
   "description": "Simulate and prepare unsigned Pharos Mainnet Multicall3 batches",
   "scripts": {
+    "build": "npm ci --omit=dev",
     "test": "node test/index.test.mjs",
     "dev": "npx wrangler pages dev public --port=8788"
   },

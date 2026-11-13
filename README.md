@@ -27,6 +27,15 @@ npm run dev
 Set `RPC_URL` in the local Worker environment only when using a trusted,
 mainnet-compatible RPC. The request cannot choose an RPC endpoint.
 
+## Deploy with Cloudflare Pages
+
+Configure the Pages project with the repository root as the root directory,
+`npm run build` as the build command, and `public` as the build output
+directory. The build command installs locked production dependencies, including
+`viem`, which Cloudflare needs when bundling the Pages Functions. Leaving the
+build command blank skips dependency installation and causes Functions bundling
+to fail to resolve `viem`.
+
 ## Simulation
 
 `POST /api/batch` accepts `action: "simulate"`, a sender address, an explicit
