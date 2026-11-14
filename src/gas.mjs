@@ -18,6 +18,9 @@ function parseEstimate(value) {
 function formatPercent(difference, total) {
   if (total === 0n) return "UNKNOWN";
   const basisPoints = (difference * 10_000n) / total;
+  if (basisPoints === 0n && difference !== 0n) {
+    return `${difference > 0n ? "+" : "-"}<0.01%`;
+  }
   const sign = basisPoints > 0n ? "+" : basisPoints < 0n ? "-" : "";
   const absolute = basisPoints < 0n ? -basisPoints : basisPoints;
   return `${sign}${absolute / 100n}.${(absolute % 100n)
@@ -41,6 +44,8 @@ export class GasSavingsEstimator {
     if (parsedBatch === null || parsedIndividual.some((value) => value === null)) {
       return {
         available: false,
+        estimated: true,
+        basis: "eth_estimateGas",
         individualGas: estimates,
         batchGas: batchEstimate,
         reason:
@@ -56,6 +61,8 @@ export class GasSavingsEstimator {
 
     return {
       available: true,
+      estimated: true,
+      basis: "eth_estimateGas",
       individualGas: estimates,
       individualGasTotal: individualGasTotal.toString(),
       batchGas: batchEstimate,

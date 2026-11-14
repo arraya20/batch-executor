@@ -76,18 +76,30 @@ individual-call diagnostics are not treated as batch results.
 For failed subcalls, standard `Error(string)` and `Panic(uint256)` revert data
 is decoded when available; other errors retain their raw return data.
 
-Gas comparison uses RPC estimates. A positive signed difference means the batch
-estimate is lower; a negative difference means batching costs more gas. Missing
-estimates remain unknown rather than being treated as zero. The report also
-shows the action-call reduction (`N -> 1`); for state-changing actions, these
-can correspond to fewer transaction submissions. Individual calls run directly
-from the sender, while batched subcalls see Multicall3 as `msg.sender`; the
-combined simulation is authoritative for batch outcomes. An unsigned
-transaction is included only when the combined simulation succeeds.
+If some subcalls fail but the combined call returns results, the app removes
+failed actions, simulates the remaining calls again, and only prepares an
+unsigned transaction if that reduced batch succeeds. The report lists the
+original per-action results, the indices included in the prepared transaction,
+and the original and prepared batch estimates. If no reduced batch can be
+verified, no transaction is included.
+
+Gas comparisons are **estimates** from `eth_estimateGas`, not measured gas
+consumption. When a partial failure occurs, the comparison includes only
+successful actions and the estimate for the re-simulated reduced batch. A
+positive signed difference means the batched estimate is lower; a negative
+difference means it is higher. Missing estimates remain unknown rather than
+being treated as zero; the report identifies action indices whose individual
+estimates were unavailable. A nonzero difference smaller than 0.01% is
+displayed as `+<0.01%` or `-<0.01%` so its direction is not lost to rounding.
+The report also shows the action-call reduction (`N -> 1`). Individual
+diagnostics run directly from the sender, while batched subcalls see Multicall3
+as `msg.sender`, so their execution contexts are not identical.
 
 Simulation is against current state and may differ by the time a transaction is
 manually submitted. The demo supports zero-value `aggregate3` calls only;
 native transfers and per-action value forwarding are not supported.
+The UI includes a partial-failure example that replaces the action list with two
+read calls and one intentional unknown-selector failure.
 
 ## Before public deployment
 

@@ -109,6 +109,16 @@ const unitTests = [
     assert(report.reason.includes("unknown gas"));
   }),
 
+  test("GasSavingsEstimator preserves the direction of sub-cent differences", () => {
+    const report = GasSavingsEstimator.compare(
+      ["300000", "300000"],
+      "600010"
+    );
+
+    equal(report.difference, "-10");
+    equal(report.percent, "-<0.01%");
+  }),
+
   test("Multicall result summary identifies failed calls and continued calls", async () => {
     const { summarizeMulticallResults } = await import("../src/bundler.mjs");
     const summary = summarizeMulticallResults(sampleActions, [
@@ -162,17 +172,39 @@ const unitTests = [
         codeHash: PHAROS_MAINNET_CODE_HASH,
         codeBytes: 3808
       }),
-      call: async (transaction) =>
-        transaction.to === batch.transaction.to
-          ? { ok: true, result: batchResult }
-          : { ok: true, result: "0x" },
-      estimate: async (transaction) => ({
-        ok: true,
-        gas:
-          transaction.to === batch.transaction.to
-            ? "90000"
-            : estimates.get(transaction.to)
-      })
+      call: async (transaction) => {
+        if (transaction.to !== batch.transaction.to) {
+          return { ok: true, result: "0x" };
+        }
+        const { args } = decodeFunctionData({
+          abi: multicall3Abi,
+          data: transaction.data
+        });
+        return {
+          ok: true,
+          result:
+            args[0].length === 3
+              ? batchResult
+              : encodeFunctionResult({
+                  abi: multicall3Abi,
+                  functionName: "aggregate3",
+                  result: [
+                    { success: true, returnData: "0x" },
+                    { success: true, returnData: "0x" }
+                  ]
+                })
+        };
+      },
+      estimate: async (transaction) => {
+        if (transaction.to !== batch.transaction.to) {
+          return { ok: true, gas: estimates.get(transaction.to) };
+        }
+        const { args } = decodeFunctionData({
+          abi: multicall3Abi,
+          data: transaction.data
+        });
+        return { ok: true, gas: args[0].length === 3 ? "90000" : "60000" };
+      }
     };
 
     const report = await simulateBatch(batch, adapter, 123456);
@@ -186,9 +218,171 @@ const unitTests = [
     equal(report.actions[1].reason, "Insufficient balance");
     equal(report.actions[2].status, "SUCCESS");
     equal(report.continuation, "Other calls continued independently.");
-    equal(report.gasComparison.difference, "30000");
+    equal(report.gasComparison.difference, "20000");
     equal(report.executionReduction.reduction, 2);
     equal(report.unsignedTransaction.from, sender);
+    equal(report.gasComparison.basis, "eth_estimateGas");
+    equal(report.gasComparison.estimated, true);
+  }),
+
+  test("Mainnet simulation prepares and estimates only successful subcalls", async () => {
+    const { simulateBatch } = await import("../src/rpc.mjs");
+    const batch = createBatch();
+    const failedResult = encodeFunctionResult({
+      abi: multicall3Abi,
+      functionName: "aggregate3",
+      result: [
+        { success: true, returnData: "0x" },
+        { success: false, returnData: "0xdeadbeef" },
+        { success: true, returnData: "0x" }
+      ]
+    });
+    const successfulSubsetResult = encodeFunctionResult({
+      abi: multicall3Abi,
+      functionName: "aggregate3",
+      result: [
+        { success: true, returnData: "0x" },
+        { success: true, returnData: "0x" }
+      ]
+    });
+    let preparedBatchFails = false;
+    let preparedSubsetHasFailure = false;
+    let allActionsFail = false;
+    let successfulIndividualEstimatesUnavailable = false;
+    const adapter = {
+      chainId: async () => ({ ok: true, chainId: 1672 }),
+      blockNumber: async () => ({ ok: true, blockNumber: "12345" }),
+      code: async () => ({
+        ok: true,
+        verified: true,
+        codeHash: PHAROS_MAINNET_CODE_HASH,
+        codeBytes: 3808
+      }),
+      call: async (transaction) => {
+        if (transaction.to !== batch.transaction.to) {
+          return transaction.to === sampleActions[1].target
+            ? {
+                ok: false,
+                kind: "REVERT",
+                error: { message: "execution reverted", data: "0xdeadbeef" }
+              }
+            : { ok: true, result: "0x" };
+        }
+
+        const { args } = decodeFunctionData({
+          abi: multicall3Abi,
+          data: transaction.data
+        });
+        if (args[0].length === 2 && preparedBatchFails) {
+          return {
+            ok: false,
+            kind: "REVERT",
+            error: { message: "execution reverted", data: "0xdeadbeef" }
+          };
+        }
+        if (args[0].length === 2 && preparedSubsetHasFailure) {
+          return {
+            ok: true,
+            result: encodeFunctionResult({
+              abi: multicall3Abi,
+              functionName: "aggregate3",
+              result: [
+                { success: true, returnData: "0x" },
+                { success: false, returnData: "0xdeadbeef" }
+              ]
+            })
+          };
+        }
+        if (args[0].length === 3 && allActionsFail) {
+          return {
+            ok: true,
+            result: encodeFunctionResult({
+              abi: multicall3Abi,
+              functionName: "aggregate3",
+              result: args[0].map(() => ({
+                success: false,
+                returnData: "0xdeadbeef"
+              }))
+            })
+          };
+        }
+        return {
+          ok: true,
+          result: args[0].length === 3 ? failedResult : successfulSubsetResult
+        };
+      },
+      estimate: async (transaction) => {
+        if (transaction.to !== batch.transaction.to) {
+          if (
+            transaction.to !== sampleActions[1].target &&
+            successfulIndividualEstimatesUnavailable
+          ) {
+            return {
+              ok: false,
+              kind: "TRANSPORT",
+              error: { message: "RPC returned HTTP 429." }
+            };
+          }
+          return transaction.to === sampleActions[1].target
+            ? {
+                ok: false,
+                kind: "REVERT",
+                error: { message: "execution reverted", data: "0xdeadbeef" }
+              }
+            : { ok: true, gas: "30000" };
+        }
+        const { args } = decodeFunctionData({
+          abi: multicall3Abi,
+          data: transaction.data
+        });
+        return { ok: true, gas: args[0].length === 3 ? "100000" : "70000" };
+      }
+    };
+
+    const report = await simulateBatch(batch, adapter, 123456);
+    const preparedCall = decodeFunctionData({
+      abi: multicall3Abi,
+      data: report.unsignedTransaction.data
+    });
+
+    equal(report.actions[1].status, "REVERT");
+    equal(preparedCall.args[0].length, 2);
+    equal(preparedCall.args[0][0].target, sampleActions[0].target);
+    equal(preparedCall.args[0][1].target, sampleActions[2].target);
+    equal(report.preparedActionIndices.join(","), "1,3");
+    equal(report.gasComparison.individualGasTotal, "60000");
+    equal(report.gasComparison.batchGas, "70000");
+    equal(report.gasComparison.available, true);
+    equal(report.batchEstimate.gas, "70000");
+    equal(report.originalBatchEstimate.gas, "100000");
+
+    preparedBatchFails = true;
+    const unsafeReport = await simulateBatch(batch, adapter, 123456);
+    equal(unsafeReport.preparedBatchOutcome, "REVERT");
+    equal(unsafeReport.unsignedTransaction, null);
+
+    preparedBatchFails = false;
+    successfulIndividualEstimatesUnavailable = true;
+    const unavailableEstimateReport = await simulateBatch(batch, adapter, 123456);
+    equal(unavailableEstimateReport.gasComparison.available, false);
+    equal(
+      unavailableEstimateReport.gasComparison.unavailableActionIndices.join(","),
+      "1,3"
+    );
+    assert(unavailableEstimateReport.unsignedTransaction);
+
+    successfulIndividualEstimatesUnavailable = false;
+    preparedBatchFails = false;
+    preparedSubsetHasFailure = true;
+    const stillPartialReport = await simulateBatch(batch, adapter, 123456);
+    equal(stillPartialReport.preparedBatchOutcome, "PARTIAL_FAILURE");
+    equal(stillPartialReport.unsignedTransaction, null);
+
+    preparedSubsetHasFailure = false;
+    allActionsFail = true;
+    const noSuccessfulCallsReport = await simulateBatch(batch, adapter, 123456);
+    equal(noSuccessfulCallsReport.preparedBatchOutcome, "NO_SUCCESSFUL_ACTIONS");
+    equal(noSuccessfulCallsReport.unsignedTransaction, null);
   }),
 
   test("Mainnet simulation fails closed when the RPC reports another chain", async () => {
@@ -297,6 +491,7 @@ const unitTests = [
       report.continuation,
       "The combined call did not produce per-action results; continuation is unknown."
     );
+    assert(report.gasComparison.reason.includes("unknown gas"));
     equal(report.unsignedTransaction, null);
   }),
 

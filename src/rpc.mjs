@@ -1,9 +1,15 @@
-import { decodeErrorResult, keccak256 } from "viem";
+import {
+  decodeErrorResult,
+  decodeFunctionResult,
+  encodeFunctionData,
+  keccak256
+} from "viem";
 import {
   DEFAULT_MULTICALL3_ADDRESS,
   PHAROS_MAINNET_CHAIN_ID,
   PHAROS_MAINNET_CODE_HASH,
   PHAROS_MAINNET_RPC_URL,
+  multicall3Abi,
   summarizeMulticallResults
 } from "./bundler.mjs";
 import { GasSavingsEstimator } from "./gas.mjs";
@@ -410,10 +416,94 @@ export async function simulateBatch(batch, adapter, now = Date.now()) {
         diagnostic: diagnosticResult(individual[index])
       }));
 
+  const successfulIndices = actions
+    .map((action, index) => (action.status === "SUCCESS" ? index : -1))
+    .filter((index) => index >= 0);
+  const hasPartialFailure =
+    batchOutcome === "SUCCESS" && successfulIndices.length < batch.calls.length;
+  let preparedTransaction = null;
+  let preparedBatchOutcome =
+    batchOutcome === "SUCCESS" && successfulIndices.length === 0
+      ? "NO_SUCCESSFUL_ACTIONS"
+      : "UNKNOWN";
+  let preparedEstimate = null;
+
+  if (batchOutcome === "SUCCESS" && !hasPartialFailure) {
+    preparedTransaction = batch.transaction;
+    preparedBatchOutcome = "SUCCESS";
+    preparedEstimate = batchEstimate;
+  } else if (hasPartialFailure && successfulIndices.length > 0) {
+    const preparedCalls = successfulIndices.map((index) => ({
+      target: batch.calls[index].target,
+      allowFailure: true,
+      callData: batch.calls[index].callData
+    }));
+    const candidateTransaction = {
+      ...batch.transaction,
+      data: encodeFunctionData({
+        abi: multicall3Abi,
+        functionName: "aggregate3",
+        args: [preparedCalls]
+      })
+    };
+    const [preparedCall, estimate] = await Promise.all([
+      adapter.call(candidateTransaction),
+      adapter.estimate(candidateTransaction)
+    ]);
+
+    preparedEstimate = estimate;
+    if (preparedCall.ok) {
+      try {
+        const preparedResults = decodeFunctionResult({
+          abi: multicall3Abi,
+          functionName: "aggregate3",
+          data: preparedCall.result
+        });
+        if (preparedResults.length !== preparedCalls.length) {
+          preparedBatchOutcome = "UNKNOWN";
+        } else if (preparedResults.every((result) => result.success)) {
+          preparedTransaction = candidateTransaction;
+          preparedBatchOutcome = "SUCCESS";
+        } else {
+          preparedBatchOutcome = "PARTIAL_FAILURE";
+        }
+      } catch {
+        preparedBatchOutcome = "UNKNOWN";
+      }
+    } else if (preparedCall.kind === "REVERT") {
+      preparedBatchOutcome = "REVERT";
+    }
+  }
+
+  const batchEstimateForReport =
+    preparedBatchOutcome === "SUCCESS"
+      ? preparedEstimate
+      : {
+          ok: false,
+          kind: "UNAVAILABLE",
+          error: {
+            message:
+              "No verified transaction containing only successful actions is available."
+          }
+        };
   const gasComparison = GasSavingsEstimator.compare(
-    individual.map((item) => item.estimate.ok ? item.estimate.gas : null),
-    batchEstimate.ok ? batchEstimate.gas : null
+    successfulIndices.map((index) =>
+      individual[index].estimate.ok ? individual[index].estimate.gas : null
+    ),
+    preparedBatchOutcome === "SUCCESS" && preparedEstimate?.ok
+      ? preparedEstimate.gas
+      : null
   );
+  gasComparison.actionIndices =
+    preparedBatchOutcome === "SUCCESS"
+      ? successfulIndices.map((index) => index + 1)
+      : [];
+  gasComparison.unavailableActionIndices = successfulIndices
+    .filter((index) => !individual[index].estimate.ok)
+    .map((index) => index + 1);
+  if (batchOutcome === "SUCCESS" && successfulIndices.length === 0) {
+    gasComparison.reason = "No successful actions are available to compare.";
+  }
 
   return {
     network: {
@@ -437,18 +527,23 @@ export async function simulateBatch(batch, adapter, now = Date.now()) {
     continuation:
       decoded?.continuation ??
       "The combined call did not produce per-action results; continuation is unknown.",
-    batchEstimate,
+    batchEstimate: batchEstimateForReport,
+    originalBatchEstimate: batchEstimate,
     actions,
     gasComparison,
+    preparedActionIndices: preparedTransaction
+      ? successfulIndices.map((index) => index + 1)
+      : [],
+    preparedBatchOutcome,
     executionReduction: {
       individualCalls: batch.callCount,
-      batchedCalls: 1,
-      reduction: batch.callCount - 1
+      batchedCalls: preparedTransaction ? 1 : 0,
+      reduction: preparedTransaction ? batch.callCount - 1 : 0
     },
     callerSemantics:
       "Individual diagnostics run directly from the sender; batched subcalls see Multicall3 as msg.sender. The combined simulation is authoritative for batch outcomes.",
-    unsignedTransaction: batchOutcome === "SUCCESS" ? batch.transaction : null,
+    unsignedTransaction: preparedTransaction,
     note:
-      "Read-only simulation only. It does not sign, send, or guarantee a future transaction result."
+      "Gas values are RPC estimates, not measured gas used. Read-only simulation only; it does not sign, send, or guarantee a future transaction result."
   };
 }

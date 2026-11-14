@@ -62,6 +62,12 @@
       font-weight: 700;
       cursor: pointer;
     }
+    button.secondary {
+      background: transparent;
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      margin-top: 0.6rem;
+    }
     button:disabled { cursor: wait; opacity: 0.6; }
     pre {
       background: #000;
@@ -105,6 +111,9 @@
         transfers and sender-dependent claims may behave differently; native
         transfers are not supported.
       </p>
+      <p>
+        Gas figures are RPC estimates, not measured gas used.
+      </p>
     </header>
 
     <section class="card" aria-labelledby="prepare-heading">
@@ -138,6 +147,13 @@
     "description": "Read sample sender balance"
   }
 ]</textarea>
+      <button id="partial-failure-button" class="secondary" type="button">
+        Load partial-failure example
+      </button>
+      <p>
+        This replaces the actions above with two successful read calls and one
+        intentional unknown-selector failure.
+      </p>
 
       <div class="check-row">
         <input id="independent" type="checkbox">
@@ -158,6 +174,7 @@
     const actionsInput = document.getElementById("actions");
     const independentInput = document.getElementById("independent");
     const simulateButton = document.getElementById("simulate-button");
+    const partialFailureButton = document.getElementById("partial-failure-button");
     const status = document.getElementById("simulation-status");
     const summary = document.getElementById("simulation-summary");
     const output = document.getElementById("simulation-output");
@@ -181,10 +198,12 @@
         `Multicall3 code verified: ${report.contractVerification.verified}`,
         `Combined simulation: ${report.batchOutcome}`,
         report.continuation,
-        `Calls/actions: ${report.executionReduction.individualCalls} -> ${report.executionReduction.batchedCalls} (${report.executionReduction.reduction} fewer)`,
+        report.unsignedTransaction
+          ? `Prepared actions: ${report.preparedActionIndices.join(", ")}; calls/actions: ${report.executionReduction.individualCalls} -> ${report.executionReduction.batchedCalls} (${report.executionReduction.reduction} fewer)`
+          : `No transaction prepared (${report.preparedBatchOutcome}).`,
         report.gasComparison.available
-          ? `Gas: ${report.gasComparison.individualGasTotal} individual -> ${report.gasComparison.batchGas} batched; difference ${report.gasComparison.difference} (${report.gasComparison.percent})`
-          : `Gas comparison unavailable: ${report.gasComparison.reason}`
+          ? `Estimated gas (${report.gasComparison.basis}): ${report.gasComparison.individualGasTotal} individual -> ${report.gasComparison.batchGas} batched; difference ${report.gasComparison.difference} (${report.gasComparison.percent}) for actions ${report.gasComparison.actionIndices.join(", ")}`
+          : `Estimated gas comparison unavailable: ${report.gasComparison.reason}${report.gasComparison.unavailableActionIndices.length ? ` Unavailable individual estimates for actions ${report.gasComparison.unavailableActionIndices.join(", ")}.` : ""}`
       ];
       for (const action of report.actions) {
         const diagnostic = action.diagnostic?.call;
@@ -198,13 +217,16 @@
       }
       lines.push(report.callerSemantics);
       if (!report.unsignedTransaction) {
-        lines.push("Unsigned transaction withheld because the combined simulation did not succeed.");
+        lines.push("Unsigned transaction withheld because no safe batch was verified.");
+      } else if (report.preparedActionIndices.length < report.executionReduction.individualCalls) {
+        lines.push("The unsigned transaction excludes actions that failed in the first simulation.");
       }
       return lines.join("\n");
     }
 
     async function simulate() {
       simulateButton.disabled = true;
+      partialFailureButton.disabled = true;
       senderInput.disabled = true;
       actionsInput.disabled = true;
       independentInput.disabled = true;
@@ -240,10 +262,32 @@
         output.textContent = "No transaction was prepared.";
       } finally {
         simulateButton.disabled = false;
+        partialFailureButton.disabled = false;
         senderInput.disabled = false;
         actionsInput.disabled = false;
         independentInput.disabled = false;
       }
+    }
+
+    function loadPartialFailureExample() {
+      actionsInput.value = JSON.stringify([
+        {
+          target: "0xcA11bde05977b3631167028862bE2a173976CA11",
+          data: "0x3408e470",
+          description: "Read Pharos chain ID"
+        },
+        {
+          target: "0xcA11bde05977b3631167028862bE2a173976CA11",
+          data: "0xdeadbeef",
+          description: "Intentional unknown-selector failure"
+        },
+        {
+          target: "0xcA11bde05977b3631167028862bE2a173976CA11",
+          data: "0x42cbb15c",
+          description: "Read current block number"
+        }
+      ], null, 2);
+      invalidateSimulation();
     }
 
     function invalidateSimulation() {
@@ -253,6 +297,7 @@
     }
 
     simulateButton.addEventListener("click", simulate);
+    partialFailureButton.addEventListener("click", loadPartialFailureExample);
     senderInput.addEventListener("input", invalidateSimulation);
     actionsInput.addEventListener("input", invalidateSimulation);
     independentInput.addEventListener("change", invalidateSimulation);
